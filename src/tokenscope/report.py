@@ -86,6 +86,7 @@ def to_dict(
                 note = "Estimated tokens without provider cache discount accounting"
 
             is_approx = any(b.is_approximate for b in call_breakdowns)
+            has_unresolved = any(b.has_unresolved_cost for b in call_breakdowns)
             cost_dict = {
                 "status": status,
                 "uncached_input_usd": uncached_usd,
@@ -102,6 +103,11 @@ def to_dict(
                 for b in call_breakdowns:
                     approx_notes.extend(b.notes)
                 cost_dict["approximate_notes"] = approx_notes
+            if has_unresolved:
+                cost_dict["has_unresolved_cost"] = True
+                cost_dict["unresolved_cache_creation_tokens"] = sum(
+                    b.unresolved_cache_creation_tokens for b in call_breakdowns
+                )
             if note:
                 cost_dict["note"] = note
             if usd_inr is not None:
@@ -256,10 +262,15 @@ def render(
             f"Cache-create: ${cost_info['cache_creation_usd']:,.4f} | "
             f"Output: ${cost_info['output_usd']:,.4f}[/dim]"
         )
-        if cost_info.get("is_approximate"):
+        if cost_info.get("has_unresolved_cost"):
+            console.print(
+                "  [dim yellow]Warning: Some cache creation tokens could not be priced "
+                "because no defensible rate exists.[/dim yellow]"
+            )
+        elif cost_info.get("is_approximate"):
             console.print(
                 "  [dim yellow]Note: Duration-specific cache rates were unavailable "
-                "and approximated using aggregate rates.[/dim yellow]"
+                "or unclassified and approximated using aggregate rates.[/dim yellow]"
             )
     elif status == "partially_reported":
         total_usd = cost_info["total_usd"]
@@ -272,10 +283,15 @@ def render(
         if usd_inr is not None and "total_inr" in cost_info:
             line += f"  (₹{cost_info['total_inr']:,.2f} at ₹{usd_inr}/USD)"
         console.print(line)
-        if cost_info.get("is_approximate"):
+        if cost_info.get("has_unresolved_cost"):
+            console.print(
+                "  [dim yellow]Warning: Some cache creation tokens could not be priced "
+                "because no defensible rate exists.[/dim yellow]"
+            )
+        elif cost_info.get("is_approximate"):
             console.print(
                 "  [dim yellow]Note: Duration-specific cache rates were unavailable "
-                "and approximated using aggregate rates.[/dim yellow]"
+                "or unclassified and approximated using aggregate rates.[/dim yellow]"
             )
     elif status == "estimated":
         total_usd = cost_info["total_usd"]

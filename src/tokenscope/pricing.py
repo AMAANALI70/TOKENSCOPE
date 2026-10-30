@@ -67,6 +67,8 @@ class CostBreakdown:
     is_approximate: bool = False
     cache_creation_details_cost: dict[str, float] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
+    has_unresolved_cost: bool = False
+    unresolved_cache_creation_tokens: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,6 +130,10 @@ class ModelPricing:
         details_costs: dict[str, float] = {}
         is_approximate = False
         notes: list[str] = []
+        has_unresolved_cost = False
+        unresolved_tokens = 0
+
+        has_defensible_aggregate = self.cache_creation_cost_per_mtok > 0.0
 
         if cache_creation_details:
             details_tokens_accounted = 0
@@ -140,22 +146,74 @@ class ModelPricing:
                     details_tokens_accounted += count
                 else:
                     is_approximate = True
-                    notes.append(
-                        f"Duration rate for {dur_key!r} unavailable; "
-                        f"used aggregate rate ${self.cache_creation_cost_per_mtok}/Mtok."
-                    )
-                    cat_cost = (count / 1_000_000) * self.cache_creation_cost_per_mtok
-                    details_costs[dur_key] = cat_cost
-                    c_cost += cat_cost
+                    if has_defensible_aggregate:
+                        notes.append(
+                            f"Duration rate for {dur_key!r} unavailable; "
+                            f"used aggregate rate ${self.cache_creation_cost_per_mtok}/Mtok."
+                        )
+                        cat_cost = (count / 1_000_000) * self.cache_creation_cost_per_mtok
+                        details_costs[dur_key] = cat_cost
+                        c_cost += cat_cost
+                    else:
+                        has_unresolved_cost = True
+                        unresolved_tokens += count
+                        notes.append(
+                            f"No defensible cache creation rate exists for {dur_key!r} "
+                            f"({count:,} tokens); cost is unresolved."
+                        )
+                        details_costs[dur_key] = 0.0
                     details_tokens_accounted += count
 
             rem_tokens = max(0, cache_creation - details_tokens_accounted)
             if rem_tokens > 0:
-                rem_cost = (rem_tokens / 1_000_000) * self.cache_creation_cost_per_mtok
-                c_cost += rem_cost
-                details_costs["other"] = rem_cost
+                is_approximate = True
+                if has_defensible_aggregate:
+                    rem_cost = (rem_tokens / 1_000_000) * self.cache_creation_cost_per_mtok
+                    c_cost += rem_cost
+                    details_costs["other"] = rem_cost
+                    notes.append(
+                        f"{rem_tokens:,} cache creation tokens unclassified by duration; "
+                        f"approximated using rate ${self.cache_creation_cost_per_mtok}/Mtok."
+                    )
+                else:
+                    has_unresolved_cost = True
+                    unresolved_tokens += rem_tokens
+                    notes.append(
+                        f"No defensible cache creation rate exists for {rem_tokens:,} "
+                        "unclassified cache creation tokens; cost is unresolved."
+                    )
+                    details_costs["other"] = 0.0
         else:
-            c_cost = (cache_creation / 1_000_000) * self.cache_creation_cost_per_mtok
+            if cache_creation > 0:
+                if self.cache_creation_duration_rates:
+                    is_approximate = True
+                    if has_defensible_aggregate:
+                        c_cost = (cache_creation / 1_000_000) * self.cache_creation_cost_per_mtok
+                        notes.append(
+                            "Cache creation duration details missing; "
+                            f"approximated using rate ${self.cache_creation_cost_per_mtok}/Mtok."
+                        )
+                    else:
+                        has_unresolved_cost = True
+                        unresolved_tokens += cache_creation
+                        notes.append(
+                            "Cache creation duration details missing and no aggregate rate "
+                            f"exists ({cache_creation:,} tokens); cost is unresolved."
+                        )
+                else:
+                    if has_defensible_aggregate:
+                        c_cost = (cache_creation / 1_000_000) * self.cache_creation_cost_per_mtok
+                    else:
+                        if self.input_cost_per_mtok > 0.0:
+                            has_unresolved_cost = True
+                            is_approximate = True
+                            unresolved_tokens += cache_creation
+                            notes.append(
+                                f"No defensible rate configured for {cache_creation:,} "
+                                "cache creation tokens; cost is unresolved."
+                            )
+                        else:
+                            c_cost = 0.0
 
         total = uncached_cost + cache_read_cost + c_cost + output_cost
 
@@ -169,6 +227,8 @@ class ModelPricing:
             is_approximate=is_approximate,
             cache_creation_details_cost=details_costs,
             notes=notes,
+            has_unresolved_cost=has_unresolved_cost,
+            unresolved_cache_creation_tokens=unresolved_tokens,
         )
 
     def calculate_cost(
