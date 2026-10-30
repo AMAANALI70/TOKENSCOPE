@@ -12,11 +12,45 @@ Strictly separated from attribution logic to keep token accounting pure.
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from tokenscope.models import Usage
+
+
+# Canonical duration aliases mapping common representations to normalized duration keys
+_CANONICAL_DURATION_ALIASES: dict[str, str] = {
+    # 5-minute aliases
+    "5m": "5m",
+    "5min": "5m",
+    "5-minute": "5m",
+    "5_minute": "5m",
+    "ephemeral_5m": "5m",
+    "ephemeral_5m_input_tokens": "5m",
+    "cache_creation_5m": "5m",
+    "cache_creation_ephemeral_5m": "5m",
+    # 1-hour aliases
+    "1h": "1h",
+    "1hr": "1h",
+    "1-hour": "1h",
+    "1_hour": "1h",
+    "60m": "1h",
+    "ephemeral_1h": "1h",
+    "ephemeral_1h_input_tokens": "1h",
+    "cache_creation_1h": "1h",
+    "cache_creation_ephemeral_1h": "1h",
+}
+
+
+def normalize_duration_key(key: str) -> str | None:
+    """Normalize a duration string or field name to its canonical identifier.
+
+    Returns canonical string (e.g. '5m', '1h') if recognized, else None.
+    Arbitrary substring matching is strictly avoided.
+    """
+    return _CANONICAL_DURATION_ALIASES.get(key.strip().lower())
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,75 +84,54 @@ class ModelPricing:
     cache_creation_duration_rates: dict[str, float] = field(default_factory=dict)
 
     def get_duration_cache_creation_rate(self, duration_key: str) -> float | None:
-        """Lookup rate for a duration category (e.g. 'ephemeral_5m_input_tokens', '5m', '1h')."""
+        """Lookup rate for a duration category using explicit normalization and aliases.
+
+        Matches exact duration keys or canonical aliases (e.g. '5m', 'ephemeral_5m_input_tokens').
+        Arbitrary substring matches (e.g. '15m' matching '5m') are strictly rejected.
+        """
         if not self.cache_creation_duration_rates:
             return None
-        key = duration_key.lower()
-        if key in self.cache_creation_duration_rates:
-            return self.cache_creation_duration_rates[key]
-        for d_key, rate in self.cache_creation_duration_rates.items():
-            d_lower = d_key.lower()
-            if d_lower == key or d_lower in key:
-                return rate
+
+        rates_lower = {k.lower().strip(): v for k, v in self.cache_creation_duration_rates.items()}
+        raw_key = duration_key.lower().strip()
+
+        # 1. Exact match against registered keys
+        if raw_key in rates_lower:
+            return rates_lower[raw_key]
+
+        # 2. Canonical alias match
+        canonical = normalize_duration_key(raw_key)
+        if canonical is not None:
+            if canonical in rates_lower:
+                return rates_lower[canonical]
+            for reg_k, reg_v in rates_lower.items():
+                if normalize_duration_key(reg_k) == canonical:
+                    return reg_v
+
         return None
 
-    def calculate_cost(
+    def compute_cost_breakdown(
         self,
         uncached_input: int,
         output: int,
         cache_read: int = 0,
         cache_creation: int = 0,
         cache_creation_details: dict[str, int] | None = None,
-    ) -> float:
-        """Compute total dollar cost for given token counts."""
+        is_provider_reported: bool = True,
+    ) -> CostBreakdown:
+        """Itemize cost components sharing the single unified calculation engine."""
         uncached_cost = (uncached_input / 1_000_000) * self.input_cost_per_mtok
         cache_read_cost = (cache_read / 1_000_000) * self.cache_read_cost_per_mtok
         output_cost = (output / 1_000_000) * self.output_cost_per_mtok
 
-        if cache_creation_details:
-            c_cost = 0.0
-            accounted = 0
-            for k, count in cache_creation_details.items():
-                rate = self.get_duration_cache_creation_rate(k)
-                eff_rate = rate if rate is not None else self.cache_creation_cost_per_mtok
-                c_cost += (count / 1_000_000) * eff_rate
-                accounted += count
-            rem = max(0, cache_creation - accounted)
-            if rem > 0:
-                c_cost += (rem / 1_000_000) * self.cache_creation_cost_per_mtok
-        else:
-            c_cost = (cache_creation / 1_000_000) * self.cache_creation_cost_per_mtok
-
-        return uncached_cost + cache_read_cost + c_cost + output_cost
-
-    def breakdown_usage(self, usage: Usage) -> CostBreakdown:
-        """Itemize cost based on provider-reported usage."""
-        uncached = (
-            usage.uncached_input_tokens
-            if usage.uncached_input_tokens is not None
-            else max(
-                0,
-                usage.input_tokens
-                - (usage.cache_read_input_tokens or 0)
-                - usage.cache_creation_input_tokens,
-            )
-        )
-        read = usage.cache_read_input_tokens or 0
-        out = usage.output_tokens
-
-        u_cost = (uncached / 1_000_000) * self.input_cost_per_mtok
-        r_cost = (read / 1_000_000) * self.cache_read_cost_per_mtok
-        o_cost = (out / 1_000_000) * self.output_cost_per_mtok
-
-        # Duration-specific cache creation pricing
         c_cost = 0.0
         details_costs: dict[str, float] = {}
         is_approximate = False
         notes: list[str] = []
 
-        if usage.cache_creation_details:
+        if cache_creation_details:
             details_tokens_accounted = 0
-            for dur_key, count in usage.cache_creation_details.items():
+            for dur_key, count in cache_creation_details.items():
                 dur_rate = self.get_duration_cache_creation_rate(dur_key)
                 if dur_rate is not None:
                     cat_cost = (count / 1_000_000) * dur_rate
@@ -136,28 +149,72 @@ class ModelPricing:
                     c_cost += cat_cost
                     details_tokens_accounted += count
 
-            rem_tokens = max(0, usage.cache_creation_input_tokens - details_tokens_accounted)
+            rem_tokens = max(0, cache_creation - details_tokens_accounted)
             if rem_tokens > 0:
                 rem_cost = (rem_tokens / 1_000_000) * self.cache_creation_cost_per_mtok
                 c_cost += rem_cost
                 details_costs["other"] = rem_cost
         else:
-            c_cost = (
-                usage.cache_creation_input_tokens / 1_000_000
-            ) * self.cache_creation_cost_per_mtok
+            c_cost = (cache_creation / 1_000_000) * self.cache_creation_cost_per_mtok
 
-        total = u_cost + r_cost + c_cost + o_cost
+        total = uncached_cost + cache_read_cost + c_cost + output_cost
 
         return CostBreakdown(
-            uncached_input_cost=u_cost,
-            cache_read_cost=r_cost,
+            uncached_input_cost=uncached_cost,
+            cache_read_cost=cache_read_cost,
             cache_creation_cost=c_cost,
-            output_cost=o_cost,
+            output_cost=output_cost,
             total_cost=total,
-            is_provider_reported=True,
+            is_provider_reported=is_provider_reported,
             is_approximate=is_approximate,
             cache_creation_details_cost=details_costs,
             notes=notes,
+        )
+
+    def calculate_cost(
+        self,
+        uncached_input: int,
+        output: int,
+        cache_read: int = 0,
+        cache_creation: int = 0,
+        cache_creation_details: dict[str, int] | None = None,
+    ) -> float:
+        """Compute total dollar cost for given token counts."""
+        breakdown = self.compute_cost_breakdown(
+            uncached_input=uncached_input,
+            output=output,
+            cache_read=cache_read,
+            cache_creation=cache_creation,
+            cache_creation_details=cache_creation_details,
+            is_provider_reported=False,
+        )
+        if breakdown.is_approximate:
+            warnings.warn(
+                f"Calculated cost is approximate: {'; '.join(breakdown.notes)}",
+                UserWarning,
+                stacklevel=2,
+            )
+        return breakdown.total_cost
+
+    def breakdown_usage(self, usage: Usage) -> CostBreakdown:
+        """Itemize cost based on provider-reported usage."""
+        uncached = (
+            usage.uncached_input_tokens
+            if usage.uncached_input_tokens is not None
+            else max(
+                0,
+                usage.input_tokens
+                - (usage.cache_read_input_tokens or 0)
+                - usage.cache_creation_input_tokens,
+            )
+        )
+        return self.compute_cost_breakdown(
+            uncached_input=uncached,
+            output=usage.output_tokens,
+            cache_read=usage.cache_read_input_tokens or 0,
+            cache_creation=usage.cache_creation_input_tokens,
+            cache_creation_details=usage.cache_creation_details,
+            is_provider_reported=True,
         )
 
     def breakdown_estimated(self, estimated_input: int, estimated_output: int) -> CostBreakdown:
@@ -220,70 +277,72 @@ class PricingRegistry:
 
 # Reference pricing for standard tier models (USD per 1M tokens)
 # Users can override or register custom models in the registry.
-DEFAULT_PRICING = PricingRegistry({
-    # OpenAI GPT-4o family
-    "gpt-4o": ModelPricing(
-        input_cost_per_mtok=2.50,
-        output_cost_per_mtok=10.00,
-        cache_read_cost_per_mtok=1.25,
-        cache_creation_cost_per_mtok=0.00,
-    ),
-    "gpt-4o-mini": ModelPricing(
-        input_cost_per_mtok=0.15,
-        output_cost_per_mtok=0.60,
-        cache_read_cost_per_mtok=0.075,
-        cache_creation_cost_per_mtok=0.00,
-    ),
-    "o1": ModelPricing(
-        input_cost_per_mtok=15.00,
-        output_cost_per_mtok=60.00,
-        cache_read_cost_per_mtok=7.50,
-        cache_creation_cost_per_mtok=0.00,
-    ),
-    "o1-mini": ModelPricing(
-        input_cost_per_mtok=3.00,
-        output_cost_per_mtok=12.00,
-        cache_read_cost_per_mtok=1.50,
-        cache_creation_cost_per_mtok=0.00,
-    ),
-    # Anthropic Claude 3.5 family (with duration-specific cache rates: 5m @ 1.25x, 1h @ 2.0x)
-    "claude-3-5-sonnet": ModelPricing(
-        input_cost_per_mtok=3.00,
-        output_cost_per_mtok=15.00,
-        cache_read_cost_per_mtok=0.30,
-        cache_creation_cost_per_mtok=3.75,
-        cache_creation_duration_rates={
-            "ephemeral_5m_input_tokens": 3.75,
-            "ephemeral_1h_input_tokens": 6.00,
-            "5m": 3.75,
-            "1h": 6.00,
-        },
-    ),
-    "claude-3-5-haiku": ModelPricing(
-        input_cost_per_mtok=1.00,
-        output_cost_per_mtok=5.00,
-        cache_read_cost_per_mtok=0.10,
-        cache_creation_cost_per_mtok=1.25,
-        cache_creation_duration_rates={
-            "ephemeral_5m_input_tokens": 1.25,
-            "ephemeral_1h_input_tokens": 2.00,
-            "5m": 1.25,
-            "1h": 2.00,
-        },
-    ),
-    "claude-3-opus": ModelPricing(
-        input_cost_per_mtok=15.00,
-        output_cost_per_mtok=75.00,
-        cache_read_cost_per_mtok=1.50,
-        cache_creation_cost_per_mtok=18.75,
-        cache_creation_duration_rates={
-            "ephemeral_5m_input_tokens": 18.75,
-            "ephemeral_1h_input_tokens": 30.00,
-            "5m": 18.75,
-            "1h": 30.00,
-        },
-    ),
-})
+DEFAULT_PRICING = PricingRegistry(
+    {
+        # OpenAI GPT-4o family
+        "gpt-4o": ModelPricing(
+            input_cost_per_mtok=2.50,
+            output_cost_per_mtok=10.00,
+            cache_read_cost_per_mtok=1.25,
+            cache_creation_cost_per_mtok=0.00,
+        ),
+        "gpt-4o-mini": ModelPricing(
+            input_cost_per_mtok=0.15,
+            output_cost_per_mtok=0.60,
+            cache_read_cost_per_mtok=0.075,
+            cache_creation_cost_per_mtok=0.00,
+        ),
+        "o1": ModelPricing(
+            input_cost_per_mtok=15.00,
+            output_cost_per_mtok=60.00,
+            cache_read_cost_per_mtok=7.50,
+            cache_creation_cost_per_mtok=0.00,
+        ),
+        "o1-mini": ModelPricing(
+            input_cost_per_mtok=3.00,
+            output_cost_per_mtok=12.00,
+            cache_read_cost_per_mtok=1.50,
+            cache_creation_cost_per_mtok=0.00,
+        ),
+        # Anthropic Claude 3.5 family (with duration-specific cache rates: 5m @ 1.25x, 1h @ 2.0x)
+        "claude-3-5-sonnet": ModelPricing(
+            input_cost_per_mtok=3.00,
+            output_cost_per_mtok=15.00,
+            cache_read_cost_per_mtok=0.30,
+            cache_creation_cost_per_mtok=3.75,
+            cache_creation_duration_rates={
+                "ephemeral_5m_input_tokens": 3.75,
+                "ephemeral_1h_input_tokens": 6.00,
+                "5m": 3.75,
+                "1h": 6.00,
+            },
+        ),
+        "claude-3-5-haiku": ModelPricing(
+            input_cost_per_mtok=1.00,
+            output_cost_per_mtok=5.00,
+            cache_read_cost_per_mtok=0.10,
+            cache_creation_cost_per_mtok=1.25,
+            cache_creation_duration_rates={
+                "ephemeral_5m_input_tokens": 1.25,
+                "ephemeral_1h_input_tokens": 2.00,
+                "5m": 1.25,
+                "1h": 2.00,
+            },
+        ),
+        "claude-3-opus": ModelPricing(
+            input_cost_per_mtok=15.00,
+            output_cost_per_mtok=75.00,
+            cache_read_cost_per_mtok=1.50,
+            cache_creation_cost_per_mtok=18.75,
+            cache_creation_duration_rates={
+                "ephemeral_5m_input_tokens": 18.75,
+                "ephemeral_1h_input_tokens": 30.00,
+                "5m": 18.75,
+                "1h": 30.00,
+            },
+        ),
+    }
+)
 
 
 def cost(tokens: int, price_per_mtok: float) -> float:

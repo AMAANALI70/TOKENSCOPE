@@ -212,6 +212,7 @@ def test_provider_passed_from_parser_to_pricing():
 
 def write_payload(payload: dict) -> str:
     import tempfile
+
     with tempfile.NamedTemporaryFile("w", delete=False, suffix=".jsonl", encoding="utf-8") as f:
         f.write(json.dumps(payload) + "\n")
         return f.name

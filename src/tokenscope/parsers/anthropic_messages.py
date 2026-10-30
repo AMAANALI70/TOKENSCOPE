@@ -133,9 +133,7 @@ def parse_call(payload: Any, index: int) -> Call:
                 )
             else:
                 # Generic / unknown / multimodal content block (e.g. image, document, custom)
-                msg_blocks.append(
-                    ContentBlock(type=str(kind), text=block.get("text"), data=block)
-                )
+                msg_blocks.append(ContentBlock(type=str(kind), text=block.get("text"), data=block))
 
         structured_messages.append(
             Message(

@@ -42,6 +42,37 @@ One LLM call per line (JSONL), in OpenAI Chat Completions or Anthropic Messages 
 optionally with the `response` (and its `usage`) attached. See
 [docs/DESIGN.md](docs/DESIGN.md#trace-format).
 
+## Pricing and Cost Accounting
+
+TokenScope features a model-aware pricing engine that accounts for:
+- Normal (uncached) input tokens
+- Cache-read input tokens (discounted prompt caching)
+- Cache-creation input tokens (cache writes / setup, including duration-specific 5m and 1h TTL rates)
+- Output tokens
+
+### Multi-Model Resolution
+In multi-model traces (e.g. mixed GPT-4o and GPT-4o Mini calls), TokenScope resolves rates per call using its built-in `DEFAULT_PRICING` registry with exact-match and longest-prefix resolution.
+
+### Fallback Pricing vs. Explicit Model Overrides
+The CLI provides flexible pricing flags:
+- **Fallback pricing (`--price-per-mtok` without `--model`)**:
+  Specifies fallback pricing applied to calls lacking model information or unrecognized custom models. Known models in the trace continue to resolve their own registry rates and are not universally clobbered.
+  ```bash
+  # Sets fallback rate ($2.50) for unmodeled calls while known models retain their registry prices
+  tokenscope audit trace.jsonl --price-per-mtok 2.50
+  ```
+
+- **Explicit model override (`--model <name>` with `--price-per-mtok`)**:
+  Overrides the pricing schedule for `<name>` in the registry for that run. Other models in the trace remain unaffected.
+  ```bash
+  # Overrides gpt-4o input rate to $3.00/Mtok, but preserves gpt-4o-mini at $0.15/Mtok
+  tokenscope audit trace.jsonl --model gpt-4o --price-per-mtok 3.00
+  ```
+
+- **Duration-specific cache creation pricing**:
+  Models like Claude 3.5 Sonnet support duration-specific cache creation rates (e.g. 5m and 1h TTLs). If a trace contains an unconfigured duration tier, TokenScope falls back to the aggregate cache creation rate and flags the cost as approximate.
+
+
 ## Python API
 
 ```python

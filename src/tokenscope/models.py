@@ -161,9 +161,7 @@ class Usage:
                     f"Uncached tokens cannot be negative: {self.uncached_input_tokens}"
                 )
             expected_total = (
-                self.uncached_input_tokens
-                + read_val
-                + self.cache_creation_input_tokens
+                self.uncached_input_tokens + read_val + self.cache_creation_input_tokens
             )
             if self.input_tokens != expected_total:
                 raise ValueError(
@@ -172,9 +170,7 @@ class Usage:
                     f"cache_creation ({self.cache_creation_input_tokens})"
                 )
         else:
-            computed_uncached = (
-                self.input_tokens - read_val - self.cache_creation_input_tokens
-            )
+            computed_uncached = self.input_tokens - read_val - self.cache_creation_input_tokens
             if computed_uncached < 0:
                 raise ValueError(
                     f"Inconsistent token counts: total input ({self.input_tokens}) is less than "

@@ -112,9 +112,7 @@ def test_anthropic_structured_representations(write_jsonl):
             },
             {
                 "role": "user",
-                "content": [
-                    {"type": "tool_result", "tool_use_id": "t_calc", "content": "4"}
-                ],
+                "content": [{"type": "tool_result", "tool_use_id": "t_calc", "content": "4"}],
             },
         ],
         "response": {

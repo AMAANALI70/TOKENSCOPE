@@ -16,15 +16,26 @@ def test_openai_roles_and_tool_name_resolution(write_jsonl):
         "messages": [
             {"role": "system", "content": "sys"},
             {"role": "user", "content": "hi"},
-            {"role": "assistant", "content": None, "tool_calls": [
-                {"id": "c1", "type": "function",
-                 "function": {"name": "read_file", "arguments": '{"path":"a"}'}}]},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "c1",
+                        "type": "function",
+                        "function": {"name": "read_file", "arguments": '{"path":"a"}'},
+                    }
+                ],
+            },
             {"role": "tool", "tool_call_id": "c1", "content": "file body"},
         ],
         "response": {
             "choices": [{"message": {"content": "done"}}],
-            "usage": {"prompt_tokens": 50, "completion_tokens": 2,
-                      "prompt_tokens_details": {"cached_tokens": 10}},
+            "usage": {
+                "prompt_tokens": 50,
+                "completion_tokens": 2,
+                "prompt_tokens_details": {"cached_tokens": 10},
+            },
         },
     }
     trace = load_trace(write_jsonl([payload]), "openai")
@@ -45,17 +56,32 @@ def test_anthropic_blocks_and_usage_normalisation(write_jsonl):
         "tools": [{"name": "grep", "description": "d", "input_schema": {"type": "object"}}],
         "messages": [
             {"role": "user", "content": "find it"},
-            {"role": "assistant", "content": [
-                {"type": "text", "text": "ok"},
-                {"type": "tool_use", "id": "t1", "name": "grep", "input": {"q": "x"}}]},
-            {"role": "user", "content": [
-                {"type": "tool_result", "tool_use_id": "t1",
-                 "content": [{"type": "text", "text": "match"}]}]},
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "ok"},
+                    {"type": "tool_use", "id": "t1", "name": "grep", "input": {"q": "x"}},
+                ],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "t1",
+                        "content": [{"type": "text", "text": "match"}],
+                    }
+                ],
+            },
         ],
         "response": {
             "content": [{"type": "text", "text": "found"}],
-            "usage": {"input_tokens": 20, "cache_read_input_tokens": 100,
-                      "cache_creation_input_tokens": 5, "output_tokens": 3},
+            "usage": {
+                "input_tokens": 20,
+                "cache_read_input_tokens": 100,
+                "cache_creation_input_tokens": 5,
+                "output_tokens": 3,
+            },
         },
     }
     trace = load_trace(write_jsonl([payload]))  # auto-detect

@@ -47,7 +47,12 @@ def audit(
     as_json: Annotated[bool, typer.Option("--json", help="Machine-readable output.")] = False,
     price_per_mtok: Annotated[
         float | None,
-        typer.Option(help="Input price in USD per 1M tokens, to show cost."),
+        typer.Option(
+            help=(
+                "Input price in USD per 1M tokens. Acts as fallback pricing for unmodeled "
+                "calls, or as input rate override when --model is specified."
+            )
+        ),
     ] = None,
     usd_inr: Annotated[
         float | None,
@@ -58,22 +63,37 @@ def audit(
         typer.Option(
             "--model",
             help=(
-                "Fallback model for calls lacking model info, "
-                "or target model for custom pricing overrides."
+                "Target model for custom pricing overrides (when paired with "
+                "--price-per-mtok), or fallback model for calls lacking model info."
             ),
         ),
     ] = None,
     output_price_per_mtok: Annotated[
         float | None,
-        typer.Option(help="Output price in USD per 1M tokens."),
+        typer.Option(
+            help=(
+                "Output price in USD per 1M tokens. Acts as fallback pricing for unmodeled "
+                "calls, or as output rate override when --model is specified."
+            )
+        ),
     ] = None,
     cache_read_price_per_mtok: Annotated[
         float | None,
-        typer.Option(help="Cache-read price in USD per 1M tokens."),
+        typer.Option(
+            help=(
+                "Cache-read price in USD per 1M tokens. Acts as fallback pricing for "
+                "unmodeled calls, or as cache-read rate override when --model is specified."
+            )
+        ),
     ] = None,
     cache_creation_price_per_mtok: Annotated[
         float | None,
-        typer.Option(help="Cache-creation price in USD per 1M tokens."),
+        typer.Option(
+            help=(
+                "Cache-creation price in USD per 1M tokens. Acts as fallback pricing for "
+                "unmodeled calls, or as cache-creation rate override when --model is specified."
+            )
+        ),
     ] = None,
 ) -> None:
     """Attribute every input token in a trace to a category and tool."""
@@ -104,12 +124,7 @@ def audit(
     )
 
     if has_custom_pricing:
-        first_model = (
-            trace.calls[0].model if trace.calls and trace.calls[0].model else None
-        )
-        base = fallback_pricing or (
-            DEFAULT_PRICING.get(first_model) if first_model else None
-        )
+        base = fallback_pricing
         custom_pricing = ModelPricing(
             input_cost_per_mtok=(
                 price_per_mtok
@@ -141,7 +156,8 @@ def audit(
                 pricing_registry.register(f"{trace.source_format}/{model}", custom_pricing)
             fallback_pricing = custom_pricing
         else:
-            # Custom overrides without --model serve as fallback pricing
+            # Custom overrides without --model serve as fallback pricing for unmodeled calls;
+            # recognized models in the trace retain their distinct registry schedules.
             fallback_pricing = custom_pricing
 
     attr = attribute(trace, counter)

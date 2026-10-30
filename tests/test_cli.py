@@ -29,9 +29,7 @@ def test_audit_table_output_runs():
 
 
 def test_bad_format_exits_2():
-    result = runner.invoke(
-        app, ["audit", "examples/sample_openai_trace.jsonl", "--format", "nope"]
-    )
+    result = runner.invoke(app, ["audit", "examples/sample_openai_trace.jsonl", "--format", "nope"])
     assert result.exit_code == 2
 
 

@@ -136,9 +136,7 @@ def to_dict(
             else None
         ),
         "cost": cost_dict,
-        "by_category": {
-            c.value: {"billed": billed[c], "unique": unique[c]} for c in billed
-        },
+        "by_category": {c.value: {"billed": billed[c], "unique": unique[c]} for c in billed},
         "by_tool": [
             {"category": cat.value, "tool": tool, "billed": n}
             for (cat, tool), n in sorted(attr.by_tool.items(), key=lambda kv: -kv[1])
@@ -274,6 +272,11 @@ def render(
         if usd_inr is not None and "total_inr" in cost_info:
             line += f"  (₹{cost_info['total_inr']:,.2f} at ₹{usd_inr}/USD)"
         console.print(line)
+        if cost_info.get("is_approximate"):
+            console.print(
+                "  [dim yellow]Note: Duration-specific cache rates were unavailable "
+                "and approximated using aggregate rates.[/dim yellow]"
+            )
     elif status == "estimated":
         total_usd = cost_info["total_usd"]
         line = f"Estimated cost: [bold yellow]${total_usd:,.4f}[/bold yellow]"

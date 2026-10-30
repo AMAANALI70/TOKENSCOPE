@@ -195,9 +195,7 @@ def parse_call(payload: Any, index: int) -> Call:
                         parsed_arguments=parsed_args,
                     )
                 )
-                output.append(
-                    Segment(Category.OUTPUT, f"{name}({args_str})", name)
-                )
+                output.append(Segment(Category.OUTPUT, f"{name}({args_str})", name))
             response_messages.append(
                 Message(
                     role=message.get("role", "assistant"),

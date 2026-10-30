@@ -410,14 +410,14 @@ def test_trace_envelope_metadata_validation(tmp_path):
     # Valid envelope with metadata dict
     p = tmp_path / "trace_envelope.json"
     p.write_text(
-        json.dumps({
-            "trace_id": "tr-100",
-            "execution_id": "ex-200",
-            "metadata": {"environment": "staging", "user_id": 123},
-            "calls": [
-                {"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}]}
-            ],
-        }),
+        json.dumps(
+            {
+                "trace_id": "tr-100",
+                "execution_id": "ex-200",
+                "metadata": {"environment": "staging", "user_id": 123},
+                "calls": [{"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}]}],
+            }
+        ),
         encoding="utf-8",
     )
     trace = load_trace(p, "openai")
@@ -428,11 +428,11 @@ def test_trace_envelope_metadata_validation(tmp_path):
     # Missing metadata should not break parsing
     p_no_meta = tmp_path / "no_meta.json"
     p_no_meta.write_text(
-        json.dumps({
-            "calls": [
-                {"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}]}
-            ],
-        }),
+        json.dumps(
+            {
+                "calls": [{"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}]}],
+            }
+        ),
         encoding="utf-8",
     )
     trace_no_meta = load_trace(p_no_meta, "openai")
@@ -441,12 +441,12 @@ def test_trace_envelope_metadata_validation(tmp_path):
     # Invalid metadata (not a dict) must raise TraceParseError
     p_bad_meta = tmp_path / "bad_meta.json"
     p_bad_meta.write_text(
-        json.dumps({
-            "metadata": "invalid_string",
-            "calls": [
-                {"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}]}
-            ],
-        }),
+        json.dumps(
+            {
+                "metadata": "invalid_string",
+                "calls": [{"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}]}],
+            }
+        ),
         encoding="utf-8",
     )
     with pytest.raises(TraceParseError, match="must be an object"):
