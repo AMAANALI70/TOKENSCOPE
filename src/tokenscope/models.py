@@ -94,6 +94,7 @@ class Message:
     name: str | None = None
     tool_calls: list[ToolCall] = field(default_factory=list)
     tool_call_id: str | None = None
+    tool_result: ToolResult | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,6 +103,9 @@ class Usage:
 
     ``input_tokens`` (and ``total_input_tokens``) is the TOTAL prompt size including
     both uncached and cached tokens, ensuring consistency across providers.
+
+    Enforces the invariant:
+    total input = uncached input + cache-read input + cache-creation input.
     """
 
     input_tokens: int
@@ -110,24 +114,73 @@ class Usage:
     uncached_input_tokens: int | None = None
     cache_read_input_tokens: int | None = None
     cache_creation_input_tokens: int = 0
+    cache_creation_details: dict[str, int] = field(default_factory=dict)
     provenance: UsageProvenance = UsageProvenance.PROVIDER
 
     def __post_init__(self) -> None:
+        if self.input_tokens < 0 or self.output_tokens < 0:
+            raise ValueError(
+                f"Token counts cannot be negative: input={self.input_tokens}, "
+                f"output={self.output_tokens}"
+            )
+        if self.cached_input_tokens < 0 or self.cache_creation_input_tokens < 0:
+            raise ValueError("Token counts cannot be negative")
+
         read_val = self.cache_read_input_tokens
         if read_val is None:
             read_val = self.cached_input_tokens
             object.__setattr__(self, "cache_read_input_tokens", read_val)
         elif self.cached_input_tokens == 0 and read_val != 0:
             object.__setattr__(self, "cached_input_tokens", read_val)
-
-        if self.uncached_input_tokens is None:
-            uncached = max(
-                0,
-                self.input_tokens
-                - (self.cache_read_input_tokens or 0)
-                - self.cache_creation_input_tokens,
+        elif self.cached_input_tokens != read_val:
+            raise ValueError(
+                f"Conflicting cached_input_tokens ({self.cached_input_tokens}) "
+                f"and cache_read_input_tokens ({read_val})"
             )
-            object.__setattr__(self, "uncached_input_tokens", uncached)
+
+        if read_val < 0:
+            raise ValueError(f"Cache-read tokens cannot be negative: {read_val}")
+
+        # Preserve and validate cache creation details (e.g. Anthropic 5m vs 1h TTL)
+        if self.cache_creation_details:
+            for k, v in self.cache_creation_details.items():
+                if v < 0:
+                    raise ValueError(f"Cache creation detail {k} cannot be negative: {v}")
+            details_sum = sum(self.cache_creation_details.values())
+            if self.cache_creation_input_tokens == 0 and details_sum > 0:
+                object.__setattr__(self, "cache_creation_input_tokens", details_sum)
+            elif details_sum > self.cache_creation_input_tokens:
+                raise ValueError(
+                    f"Sum of cache_creation_details ({details_sum}) exceeds "
+                    f"cache_creation_input_tokens ({self.cache_creation_input_tokens})"
+                )
+
+        if self.uncached_input_tokens is not None:
+            if self.uncached_input_tokens < 0:
+                raise ValueError(
+                    f"Uncached tokens cannot be negative: {self.uncached_input_tokens}"
+                )
+            expected_total = (
+                self.uncached_input_tokens
+                + read_val
+                + self.cache_creation_input_tokens
+            )
+            if self.input_tokens != expected_total:
+                raise ValueError(
+                    f"Inconsistent token counts: total input ({self.input_tokens}) != "
+                    f"uncached ({self.uncached_input_tokens}) + cache_read ({read_val}) + "
+                    f"cache_creation ({self.cache_creation_input_tokens})"
+                )
+        else:
+            computed_uncached = (
+                self.input_tokens - read_val - self.cache_creation_input_tokens
+            )
+            if computed_uncached < 0:
+                raise ValueError(
+                    f"Inconsistent token counts: total input ({self.input_tokens}) is less than "
+                    f"cache_read ({read_val}) + cache_creation ({self.cache_creation_input_tokens})"
+                )
+            object.__setattr__(self, "uncached_input_tokens", computed_uncached)
 
     @property
     def total_input_tokens(self) -> int:

@@ -20,7 +20,14 @@ import hashlib
 from collections import defaultdict
 from dataclasses import dataclass, field
 
-from tokenscope.models import INPUT_CATEGORIES, Category, Segment, Trace, Usage
+from tokenscope.models import (
+    INPUT_CATEGORIES,
+    Category,
+    Segment,
+    Trace,
+    Usage,
+    UsageProvenance,
+)
 from tokenscope.tokenizers import TokenCounter
 
 
@@ -100,7 +107,10 @@ class TraceAttribution:
         """
         reported = est = 0
         for c in self.calls:
-            if c.reported_input is not None:
+            if c.usage is not None and c.usage.provenance == UsageProvenance.PROVIDER:
+                reported += c.usage.input_tokens
+                est += c.estimated_input
+            elif c.usage is None and c.reported_input is not None:
                 reported += c.reported_input
                 est += c.estimated_input
         return reported / est if est else None
@@ -108,19 +118,29 @@ class TraceAttribution:
     @property
     def has_reported_usage(self) -> bool:
         """True if any call in this trace contains provider-reported usage."""
-        return any(c.usage is not None for c in self.calls)
+        return any(
+            c.usage is not None and c.usage.provenance == UsageProvenance.PROVIDER
+            for c in self.calls
+        )
 
     @property
     def all_calls_have_reported_usage(self) -> bool:
         """True if every call in this trace contains provider-reported usage."""
-        return bool(self.calls) and all(c.usage is not None for c in self.calls)
+        return bool(self.calls) and all(
+            c.usage is not None and c.usage.provenance == UsageProvenance.PROVIDER
+            for c in self.calls
+        )
 
     @property
     def reported_input_total(self) -> int | None:
-        """Sum of provider-reported total prompt tokens across calls with usage."""
+        """Sum of provider-reported total prompt tokens across calls with provider usage."""
         if not self.has_reported_usage:
             return None
-        return sum(c.usage.input_tokens for c in self.calls if c.usage is not None)
+        return sum(
+            c.usage.input_tokens
+            for c in self.calls
+            if c.usage is not None and c.usage.provenance == UsageProvenance.PROVIDER
+        )
 
     @property
     def reported_uncached_input_total(self) -> int | None:
@@ -130,7 +150,11 @@ class TraceAttribution:
         return sum(
             c.usage.uncached_input_tokens
             for c in self.calls
-            if c.usage is not None and c.usage.uncached_input_tokens is not None
+            if (
+                c.usage is not None
+                and c.usage.provenance == UsageProvenance.PROVIDER
+                and c.usage.uncached_input_tokens is not None
+            )
         )
 
     @property
@@ -141,7 +165,11 @@ class TraceAttribution:
         return sum(
             c.usage.cache_read_input_tokens
             for c in self.calls
-            if c.usage is not None and c.usage.cache_read_input_tokens is not None
+            if (
+                c.usage is not None
+                and c.usage.provenance == UsageProvenance.PROVIDER
+                and c.usage.cache_read_input_tokens is not None
+            )
         )
 
     @property
@@ -152,7 +180,7 @@ class TraceAttribution:
         return sum(
             c.usage.cache_creation_input_tokens
             for c in self.calls
-            if c.usage is not None
+            if c.usage is not None and c.usage.provenance == UsageProvenance.PROVIDER
         )
 
     @property
@@ -160,7 +188,11 @@ class TraceAttribution:
         """Sum of provider-reported output/completion tokens."""
         if not self.has_reported_usage:
             return None
-        return sum(c.usage.output_tokens for c in self.calls if c.usage is not None)
+        return sum(
+            c.usage.output_tokens
+            for c in self.calls
+            if c.usage is not None and c.usage.provenance == UsageProvenance.PROVIDER
+        )
 
 
 def attribute(trace: Trace, counter: TokenCounter) -> TraceAttribution:
@@ -188,13 +220,18 @@ def attribute(trace: Trace, counter: TokenCounter) -> TraceAttribution:
                 by_tool[(seg.category, seg.tool_name)] += n
 
         output_tokens = sum(counter.count(s.text) for s in call.output_segments)
+        reported_input_val = (
+            call.usage.input_tokens
+            if (call.usage and call.usage.provenance == UsageProvenance.PROVIDER)
+            else None
+        )
         calls.append(
             CallAttribution(
                 call_index=call.index,
                 by_category=billed,
                 unique_by_category=unique,
                 output_tokens=output_tokens,
-                reported_input=call.usage.input_tokens if call.usage else None,
+                reported_input=reported_input_val,
                 usage=call.usage,
                 call_id=call.call_id,
                 model=call.model,

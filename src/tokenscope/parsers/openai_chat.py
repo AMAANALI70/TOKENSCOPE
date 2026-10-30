@@ -16,10 +16,12 @@ from typing import Any
 from tokenscope.models import (
     Call,
     Category,
+    ContentBlock,
     Message,
     Segment,
     ToolCall,
     ToolDefinition,
+    ToolResult,
     Usage,
     UsageProvenance,
 )
@@ -59,12 +61,15 @@ def parse_call(payload: Any, index: int) -> Call:
         role = msg.get("role")
 
         msg_tool_calls: list[ToolCall] = []
+        tool_result_obj: ToolResult | None = None
+        raw_content = msg.get("content")
+
         if role in ("system", "developer"):
-            segments.append(Segment(Category.SYSTEM, text_of(msg.get("content")), None, i))
+            segments.append(Segment(Category.SYSTEM, text_of(raw_content), None, i))
         elif role == "user":
-            segments.append(Segment(Category.USER, text_of(msg.get("content")), None, i))
+            segments.append(Segment(Category.USER, text_of(raw_content), None, i))
         elif role == "assistant":
-            text = text_of(msg.get("content"))
+            text = text_of(raw_content)
             if text:
                 segments.append(Segment(Category.ASSISTANT, text, None, i))
             for tc in msg.get("tool_calls") or []:
@@ -82,7 +87,13 @@ def parse_call(payload: Any, index: int) -> Call:
                         parsed_args = json.loads(raw_args)
                     except Exception:
                         parsed_args = None
-                args_str = raw_args if isinstance(raw_args, str) else canonical_json(raw_args)
+                    args_str = raw_args
+                elif isinstance(raw_args, dict):
+                    parsed_args = raw_args
+                    args_str = canonical_json(raw_args)
+                else:
+                    args_str = str(raw_args)
+
                 msg_tool_calls.append(
                     ToolCall(
                         id=tc_id,
@@ -91,21 +102,50 @@ def parse_call(payload: Any, index: int) -> Call:
                         parsed_arguments=parsed_args,
                     )
                 )
-                body = f"{name}({raw_args})"
+                body = f"{name}({args_str})"
                 segments.append(Segment(Category.TOOL_CALL, body, name, i))
         elif role in ("tool", "function"):
             name = msg.get("name") or call_id_to_name.get(msg.get("tool_call_id", ""))
-            segments.append(Segment(Category.TOOL_RESULT, text_of(msg.get("content")), name, i))
+            res_content = text_of(raw_content)
+            segments.append(Segment(Category.TOOL_RESULT, res_content, name, i))
+            tool_result_obj = ToolResult(
+                tool_call_id=msg.get("tool_call_id"),
+                name=name,
+                content=res_content,
+                is_error=False,
+                raw_content=raw_content,
+            )
         else:
             raise TraceParseError(f"call {index}: message {i} has unsupported role {role!r}")
+
+        # Preserve structured content blocks and multimodal metadata
+        msg_content: str | list[ContentBlock] | None
+        if isinstance(raw_content, list):
+            blocks: list[ContentBlock] = []
+            for part in raw_content:
+                if isinstance(part, str):
+                    blocks.append(ContentBlock(type="text", text=part, data=part))
+                elif isinstance(part, dict):
+                    p_type = str(part.get("type", "unknown"))
+                    blocks.append(ContentBlock(type=p_type, text=part.get("text"), data=part))
+                else:
+                    blocks.append(ContentBlock(type="raw", text=str(part), data=part))
+            msg_content = blocks
+        elif isinstance(raw_content, str):
+            msg_content = raw_content
+        elif raw_content is None:
+            msg_content = None
+        else:
+            msg_content = text_of(raw_content)
 
         structured_messages.append(
             Message(
                 role=str(role),
-                content=text_of(msg.get("content")),
+                content=msg_content,
                 name=msg.get("name"),
                 tool_calls=msg_tool_calls,
                 tool_call_id=msg.get("tool_call_id"),
+                tool_result=tool_result_obj,
             )
         )
 
@@ -115,6 +155,7 @@ def parse_call(payload: Any, index: int) -> Call:
     response = payload.get("response")
     usage_dict = payload.get("usage")
     call_id = payload.get("call_id") or payload.get("id")
+    execution_id = payload.get("execution_id") or payload.get("session_id")
 
     if isinstance(response, dict):
         if not call_id:
@@ -139,7 +180,13 @@ def parse_call(payload: Any, index: int) -> Call:
                         parsed_args = json.loads(raw_args)
                     except Exception:
                         parsed_args = None
-                args_str = raw_args if isinstance(raw_args, str) else canonical_json(raw_args)
+                    args_str = raw_args
+                elif isinstance(raw_args, dict):
+                    parsed_args = raw_args
+                    args_str = canonical_json(raw_args)
+                else:
+                    args_str = str(raw_args)
+
                 resp_tool_calls.append(
                     ToolCall(
                         id=tc.get("id"),
@@ -149,7 +196,7 @@ def parse_call(payload: Any, index: int) -> Call:
                     )
                 )
                 output.append(
-                    Segment(Category.OUTPUT, f"{name}({raw_args})", name)
+                    Segment(Category.OUTPUT, f"{name}({args_str})", name)
                 )
             response_messages.append(
                 Message(
@@ -160,20 +207,34 @@ def parse_call(payload: Any, index: int) -> Call:
             )
 
     if isinstance(usage_dict, dict) and "prompt_tokens" in usage_dict:
-        details = usage_dict.get("prompt_tokens_details") or {}
-        prompt_tokens = int(usage_dict["prompt_tokens"])
-        completion_tokens = int(usage_dict.get("completion_tokens", 0))
-        cached_tokens = int(details.get("cached_tokens", 0) or 0)
-        uncached_tokens = max(0, prompt_tokens - cached_tokens)
-        usage = Usage(
-            input_tokens=prompt_tokens,
-            output_tokens=completion_tokens,
-            cached_input_tokens=cached_tokens,
-            uncached_input_tokens=uncached_tokens,
-            cache_read_input_tokens=cached_tokens,
-            cache_creation_input_tokens=0,
-            provenance=UsageProvenance.PROVIDER,
-        )
+        try:
+            prompt_tokens = int(usage_dict["prompt_tokens"])
+            completion_tokens = int(usage_dict.get("completion_tokens", 0))
+            details = usage_dict.get("prompt_tokens_details") or {}
+            cached_tokens = int(details.get("cached_tokens", 0) or 0)
+        except (ValueError, TypeError) as exc:
+            raise TraceParseError(f"call {index}: invalid non-integer usage: {exc}") from exc
+
+        if prompt_tokens < 0 or completion_tokens < 0 or cached_tokens < 0:
+            raise TraceParseError(f"call {index}: negative token counts in usage")
+        if cached_tokens > prompt_tokens:
+            raise TraceParseError(
+                f"call {index}: cached_tokens ({cached_tokens}) > prompt_tokens ({prompt_tokens})"
+            )
+
+        uncached_tokens = prompt_tokens - cached_tokens
+        try:
+            usage = Usage(
+                input_tokens=prompt_tokens,
+                output_tokens=completion_tokens,
+                cached_input_tokens=cached_tokens,
+                uncached_input_tokens=uncached_tokens,
+                cache_read_input_tokens=cached_tokens,
+                cache_creation_input_tokens=0,
+                provenance=UsageProvenance.PROVIDER,
+            )
+        except ValueError as exc:
+            raise TraceParseError(f"call {index}: inconsistent usage tokens: {exc}") from exc
 
     metadata: dict[str, Any] = {}
     if isinstance(response, dict):
@@ -191,6 +252,7 @@ def parse_call(payload: Any, index: int) -> Call:
         output_segments=output,
         usage=usage,
         call_id=call_id,
+        execution_id=execution_id,
         messages=structured_messages,
         tools=structured_tools,
         response_messages=response_messages,

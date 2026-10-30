@@ -13,7 +13,7 @@ from tokenscope import __version__
 from tokenscope.attribution import attribute
 from tokenscope.loader import load_trace
 from tokenscope.parsers import TraceParseError
-from tokenscope.pricing import DEFAULT_PRICING, ModelPricing
+from tokenscope.pricing import DEFAULT_PRICING, ModelPricing, PricingRegistry
 from tokenscope.report import render, to_dict
 from tokenscope.tokenizers import TokenizerUnavailableError, get_counter
 
@@ -79,10 +79,13 @@ def audit(
         raise typer.Exit(code=2) from exc
 
     pricing: ModelPricing | None = None
+    pricing_registry: PricingRegistry | None = None
     target_model = model or (trace.calls[0].model if trace.calls and trace.calls[0].model else None)
 
     if model:
         pricing = DEFAULT_PRICING.get(model, trace.source_format)
+    else:
+        pricing_registry = DEFAULT_PRICING
 
     if (
         price_per_mtok is not None
@@ -113,12 +116,19 @@ def audit(
                 else (base.cache_creation_cost_per_mtok if base else 0.0)
             ),
         )
+        pricing_registry = None
 
     attr = attribute(trace, counter)
     if as_json:
         typer.echo(
             json.dumps(
-                to_dict(attr, price_per_mtok=price_per_mtok, usd_inr=usd_inr, pricing=pricing),
+                to_dict(
+                    attr,
+                    price_per_mtok=price_per_mtok,
+                    usd_inr=usd_inr,
+                    pricing=pricing,
+                    pricing_registry=pricing_registry,
+                ),
                 indent=2,
             )
         )
@@ -129,6 +139,7 @@ def audit(
             price_per_mtok=price_per_mtok,
             usd_inr=usd_inr,
             pricing=pricing,
+            pricing_registry=pricing_registry,
         )
 
 

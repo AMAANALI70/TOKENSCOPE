@@ -119,19 +119,30 @@ class PricingRegistry:
         if not model:
             return None
         key = model.lower()
-        if key in self._rates:
-            return self._rates[key]
+
+        # 1. Exact matches: provider-specific exact match first, then generic exact match
         if provider:
             namespaced = f"{provider.lower()}/{key}"
             if namespaced in self._rates:
                 return self._rates[namespaced]
+        if key in self._rates:
+            return self._rates[key]
 
-        # Prefix matching: e.g. "gpt-4o-2024-08-06" matches "gpt-4o"
+        # 2. Prefix matches: candidate collection with longest prefix and provider priority
+        candidates: list[tuple[int, bool, ModelPricing]] = []
         for reg_key, pricing in self._rates.items():
             if "/" in reg_key:
-                _, reg_key = reg_key.split("/", 1)
-            if key.startswith(reg_key):
-                return pricing
+                pfx_provider, pfx_model = reg_key.split("/", 1)
+                if provider and pfx_provider == provider.lower() and key.startswith(pfx_model):
+                    candidates.append((len(pfx_model), True, pricing))
+            elif key.startswith(reg_key):
+                candidates.append((len(reg_key), False, pricing))
+
+        if candidates:
+            # Provider-specific prefix matches win over generic, sorted by longest prefix
+            candidates.sort(key=lambda item: (item[1], item[0]), reverse=True)
+            return candidates[0][2]
+
         return None
 
 

@@ -43,9 +43,20 @@ def load_trace(path: str | Path, fmt: str = "auto") -> Trace:
         try:
             full_json = json.loads(raw)
             if isinstance(full_json, dict) and "calls" in full_json:
+                if not isinstance(full_json["calls"], list):
+                    raise TraceParseError(f"{path}: 'calls' in trace envelope must be a list")
                 trace_id = full_json.get("trace_id") or full_json.get("id")
-                execution_id = full_json.get("execution_id")
-                metadata = full_json.get("metadata", {})
+                execution_id = full_json.get("execution_id") or full_json.get("session_id")
+                raw_meta = full_json.get("metadata")
+                if raw_meta is not None:
+                    if isinstance(raw_meta, dict):
+                        metadata = dict(raw_meta)
+                    else:
+                        raise TraceParseError(
+                            f"{path}: 'metadata' in trace envelope must be an object"
+                        )
+                else:
+                    metadata = {}
                 payloads = full_json["calls"]
             else:
                 payloads = _read_payloads(path_obj)

@@ -67,6 +67,7 @@ def parse_call(payload: Any, index: int) -> Call:
         msg_blocks: list[ContentBlock] = []
         msg_tool_calls: list[ToolCall] = []
         tool_call_id: str | None = None
+        tool_res_obj: ToolResult | None = None
 
         if isinstance(content, str):
             segments.append(Segment(text_category, content, None, i))
@@ -77,23 +78,28 @@ def parse_call(payload: Any, index: int) -> Call:
 
         for block in content:
             if not isinstance(block, dict):
+                msg_blocks.append(ContentBlock(type="raw", text=str(block), data=block))
                 continue
-            kind = block.get("type")
+            kind = block.get("type", "unknown")
             if kind == "text":
                 txt = block.get("text", "")
                 segments.append(Segment(text_category, txt, None, i))
-                msg_blocks.append(ContentBlock(type="text", text=txt))
+                msg_blocks.append(ContentBlock(type="text", text=txt, data=block))
             elif kind == "thinking":
                 thk = block.get("thinking", "")
                 segments.append(Segment(Category.ASSISTANT, thk, None, i))
-                msg_blocks.append(ContentBlock(type="thinking", text=thk))
+                msg_blocks.append(ContentBlock(type="thinking", text=thk, data=block))
             elif kind == "tool_use":
                 name = block.get("name") or "unknown"
                 t_id = block.get("id")
                 if t_id:
                     tool_use_id_to_name[t_id] = name
                 raw_input = block.get("input", {})
-                args_str = canonical_json(raw_input)
+                args_str = (
+                    canonical_json(raw_input)
+                    if isinstance(raw_input, (dict, list))
+                    else str(raw_input)
+                )
                 msg_tool_calls.append(
                     ToolCall(
                         id=t_id,
@@ -111,18 +117,24 @@ def parse_call(payload: Any, index: int) -> Call:
                 name = tool_use_id_to_name.get(res_id or "")
                 res_text = text_of(block.get("content"))
                 segments.append(Segment(Category.TOOL_RESULT, res_text, name, i))
+                tool_res_obj = ToolResult(
+                    tool_call_id=res_id,
+                    name=name,
+                    content=res_text,
+                    is_error=bool(block.get("is_error", False)),
+                    raw_content=block.get("content"),
+                )
                 msg_blocks.append(
                     ContentBlock(
                         type="tool_result",
                         text=res_text,
-                        data=ToolResult(
-                            tool_call_id=res_id,
-                            name=name,
-                            content=res_text,
-                            is_error=bool(block.get("is_error", False)),
-                            raw_content=block.get("content"),
-                        ),
+                        data=tool_res_obj,
                     )
+                )
+            else:
+                # Generic / unknown / multimodal content block (e.g. image, document, custom)
+                msg_blocks.append(
+                    ContentBlock(type=str(kind), text=block.get("text"), data=block)
                 )
 
         structured_messages.append(
@@ -131,6 +143,7 @@ def parse_call(payload: Any, index: int) -> Call:
                 content=msg_blocks,
                 tool_calls=msg_tool_calls,
                 tool_call_id=tool_call_id,
+                tool_result=tool_res_obj,
             )
         )
 
@@ -139,6 +152,7 @@ def parse_call(payload: Any, index: int) -> Call:
     usage: Usage | None = None
     response = payload.get("response")
     call_id = payload.get("call_id") or payload.get("id")
+    execution_id = payload.get("execution_id") or payload.get("session_id")
 
     if isinstance(response, dict):
         if not call_id:
@@ -148,16 +162,22 @@ def parse_call(payload: Any, index: int) -> Call:
 
         for block in response.get("content") or []:
             if not isinstance(block, dict):
+                resp_blocks.append(ContentBlock(type="raw", text=str(block), data=block))
                 continue
-            if block.get("type") == "text":
+            b_type = block.get("type", "unknown")
+            if b_type == "text":
                 txt = block.get("text", "")
                 output.append(Segment(Category.OUTPUT, txt))
-                resp_blocks.append(ContentBlock(type="text", text=txt))
-            elif block.get("type") == "tool_use":
+                resp_blocks.append(ContentBlock(type="text", text=txt, data=block))
+            elif b_type == "tool_use":
                 name = block.get("name") or "unknown"
                 t_id = block.get("id")
                 raw_input = block.get("input", {})
-                args_str = canonical_json(raw_input)
+                args_str = (
+                    canonical_json(raw_input)
+                    if isinstance(raw_input, (dict, list))
+                    else str(raw_input)
+                )
                 resp_tool_calls.append(
                     ToolCall(
                         id=t_id,
@@ -169,6 +189,10 @@ def parse_call(payload: Any, index: int) -> Call:
                 body = f"{name}({args_str})"
                 output.append(Segment(Category.OUTPUT, body, name))
                 resp_blocks.append(ContentBlock(type="tool_use", text=body, data=block))
+            else:
+                resp_blocks.append(
+                    ContentBlock(type=str(b_type), text=block.get("text"), data=block)
+                )
 
         response_messages.append(
             Message(
@@ -178,21 +202,40 @@ def parse_call(payload: Any, index: int) -> Call:
             )
         )
 
-        u = response.get("usage")
+        u = response.get("usage") if isinstance(response, dict) else payload.get("usage")
         if isinstance(u, dict) and "input_tokens" in u:
-            uncached = int(u["input_tokens"])
-            cache_read = int(u.get("cache_read_input_tokens", 0) or 0)
-            cache_write = int(u.get("cache_creation_input_tokens", 0) or 0)
+            try:
+                uncached = int(u["input_tokens"])
+                cache_read = int(u.get("cache_read_input_tokens", 0) or 0)
+                cache_write = int(u.get("cache_creation_input_tokens", 0) or 0)
+                output_toks = int(u.get("output_tokens", 0))
+            except (ValueError, TypeError) as exc:
+                raise TraceParseError(f"call {index}: invalid non-integer usage: {exc}") from exc
+
+            if uncached < 0 or cache_read < 0 or cache_write < 0 or output_toks < 0:
+                raise TraceParseError(f"call {index}: negative token counts in usage")
+
+            details_dict: dict[str, int] = {}
+            raw_details = u.get("cache_creation")
+            if isinstance(raw_details, dict):
+                for k, v in raw_details.items():
+                    if isinstance(v, (int, float)):
+                        details_dict[k] = int(v)
+
             total_input = uncached + cache_read + cache_write
-            usage = Usage(
-                input_tokens=total_input,
-                output_tokens=int(u.get("output_tokens", 0)),
-                cached_input_tokens=cache_read,
-                uncached_input_tokens=uncached,
-                cache_read_input_tokens=cache_read,
-                cache_creation_input_tokens=cache_write,
-                provenance=UsageProvenance.PROVIDER,
-            )
+            try:
+                usage = Usage(
+                    input_tokens=total_input,
+                    output_tokens=output_toks,
+                    cached_input_tokens=cache_read,
+                    uncached_input_tokens=uncached,
+                    cache_read_input_tokens=cache_read,
+                    cache_creation_input_tokens=cache_write,
+                    cache_creation_details=details_dict,
+                    provenance=UsageProvenance.PROVIDER,
+                )
+            except ValueError as exc:
+                raise TraceParseError(f"call {index}: inconsistent usage tokens: {exc}") from exc
 
     metadata: dict[str, Any] = {}
     if system:
@@ -209,6 +252,7 @@ def parse_call(payload: Any, index: int) -> Call:
         output_segments=output,
         usage=usage,
         call_id=call_id,
+        execution_id=execution_id,
         messages=structured_messages,
         tools=structured_tools,
         response_messages=response_messages,

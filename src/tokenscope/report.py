@@ -8,8 +8,8 @@ from rich.console import Console
 from rich.table import Table
 
 from tokenscope.attribution import TraceAttribution
-from tokenscope.models import Category
-from tokenscope.pricing import CostBreakdown, ModelPricing, cost
+from tokenscope.models import Category, UsageProvenance
+from tokenscope.pricing import CostBreakdown, ModelPricing, PricingRegistry, cost
 
 
 def _pct(part: int, whole: int) -> str:
@@ -20,28 +20,70 @@ def to_dict(
     attr: TraceAttribution,
     price_per_mtok: float | None = None,
     usd_inr: float | None = None,
-    pricing: ModelPricing | None = None,
+    pricing: ModelPricing | PricingRegistry | None = None,
+    pricing_registry: PricingRegistry | None = None,
 ) -> dict[str, Any]:
     billed = attr.billed_by_category
     unique = attr.unique_by_category
 
-    effective_pricing = pricing
-    if effective_pricing is None and price_per_mtok is not None:
-        effective_pricing = ModelPricing(input_cost_per_mtok=price_per_mtok)
+    registry = pricing_registry or (pricing if isinstance(pricing, PricingRegistry) else None)
+    fallback_pricing = pricing if isinstance(pricing, ModelPricing) else None
+    if fallback_pricing is None and price_per_mtok is not None:
+        fallback_pricing = ModelPricing(input_cost_per_mtok=price_per_mtok)
 
     cost_dict: dict[str, Any]
-    if effective_pricing is not None:
-        if attr.has_reported_usage:
-            call_costs: list[CostBreakdown] = []
-            for c in attr.calls:
-                if c.usage:
-                    call_costs.append(effective_pricing.breakdown_usage(c.usage))
-            uncached_usd = sum(b.uncached_input_cost for b in call_costs)
-            read_usd = sum(b.cache_read_cost for b in call_costs)
-            create_usd = sum(b.cache_creation_cost for b in call_costs)
-            output_usd = sum(b.output_cost for b in call_costs)
-            total_usd = sum(b.total_cost for b in call_costs)
-            status = "reported" if attr.all_calls_have_reported_usage else "partially_reported"
+    call_breakdowns: list[CostBreakdown] = []
+    reported_calls_count = 0
+    estimated_calls_count = 0
+    has_unknown_pricing = False
+
+    if not attr.calls:
+        cost_dict = {"status": "unknown"}
+    else:
+        for c in attr.calls:
+            # Resolve model-specific pricing per call
+            call_pricing: ModelPricing | None = None
+            if registry is not None and c.model:
+                call_pricing = registry.get(c.model)
+            if call_pricing is None:
+                call_pricing = fallback_pricing
+
+            if call_pricing is None:
+                has_unknown_pricing = True
+                break
+
+            # Handle usage provenance per call
+            if c.usage is not None and c.usage.provenance == UsageProvenance.PROVIDER:
+                call_breakdowns.append(call_pricing.breakdown_usage(c.usage))
+                reported_calls_count += 1
+            else:
+                call_breakdowns.append(
+                    call_pricing.breakdown_estimated(c.estimated_input, c.output_tokens)
+                )
+                estimated_calls_count += 1
+
+        if has_unknown_pricing or not call_breakdowns:
+            cost_dict = {"status": "unknown"}
+        else:
+            uncached_usd = sum(b.uncached_input_cost for b in call_breakdowns)
+            read_usd = sum(b.cache_read_cost for b in call_breakdowns)
+            create_usd = sum(b.cache_creation_cost for b in call_breakdowns)
+            output_usd = sum(b.output_cost for b in call_breakdowns)
+            total_usd = sum(b.total_cost for b in call_breakdowns)
+
+            if reported_calls_count == len(attr.calls):
+                status = "reported"
+                note = None
+            elif reported_calls_count > 0:
+                status = "partially_reported"
+                note = (
+                    f"Partially reported: {reported_calls_count}/{len(attr.calls)} calls used "
+                    "provider usage, remaining calls used local estimates"
+                )
+            else:
+                status = "estimated"
+                note = "Estimated tokens without provider cache discount accounting"
+
             cost_dict = {
                 "status": status,
                 "uncached_input_usd": uncached_usd,
@@ -49,25 +91,13 @@ def to_dict(
                 "cache_creation_usd": create_usd,
                 "output_usd": output_usd,
                 "total_usd": total_usd,
+                "reported_calls": reported_calls_count,
+                "estimated_calls": estimated_calls_count,
             }
-        else:
-            est_b = effective_pricing.breakdown_estimated(
-                attr.billed_input_total,
-                attr.output_total,
-            )
-            cost_dict = {
-                "status": "estimated",
-                "uncached_input_usd": est_b.uncached_input_cost,
-                "cache_read_usd": None,
-                "cache_creation_usd": None,
-                "output_usd": est_b.output_cost,
-                "total_usd": est_b.total_cost,
-                "note": "Estimated tokens without provider cache discount accounting",
-            }
-        if usd_inr is not None and "total_usd" in cost_dict and cost_dict["total_usd"] is not None:
-            cost_dict["total_inr"] = cost_dict["total_usd"] * usd_inr
-    else:
-        cost_dict = {"status": "unknown"}
+            if note:
+                cost_dict["note"] = note
+            if usd_inr is not None:
+                cost_dict["total_inr"] = total_usd * usd_inr
 
     out: dict[str, Any] = {
         "tokenizer": attr.tokenizer,
@@ -121,7 +151,8 @@ def render(
     price_per_mtok: float | None = None,
     usd_inr: float | None = None,
     top_tools: int = 10,
-    pricing: ModelPricing | None = None,
+    pricing: ModelPricing | PricingRegistry | None = None,
+    pricing_registry: PricingRegistry | None = None,
 ) -> None:
     billed = attr.billed_by_category
     unique = attr.unique_by_category
@@ -197,32 +228,44 @@ def render(
         console.print(t)
 
     # Cost reporting
-    effective_pricing = pricing
-    if effective_pricing is None and price_per_mtok is not None:
-        effective_pricing = ModelPricing(input_cost_per_mtok=price_per_mtok)
+    rep_dict = to_dict(
+        attr,
+        price_per_mtok=price_per_mtok,
+        usd_inr=usd_inr,
+        pricing=pricing,
+        pricing_registry=pricing_registry,
+    )
+    cost_info = rep_dict.get("cost", {})
+    status = cost_info.get("status")
 
-    if effective_pricing is not None:
-        rep_dict = to_dict(attr, price_per_mtok, usd_inr, pricing=effective_pricing)
-        cost_info = rep_dict.get("cost", {})
-        status = cost_info.get("status")
-
-        if status in ("reported", "partially_reported"):
-            total_usd = cost_info["total_usd"]
-            line = f"Provider-reported cost: [bold green]${total_usd:,.4f}[/bold green]"
-            if usd_inr is not None and "total_inr" in cost_info:
-                line += f"  (₹{cost_info['total_inr']:,.2f} at ₹{usd_inr}/USD)"
-            console.print(line)
-            console.print(
-                f"  [dim]Uncached: ${cost_info['uncached_input_usd']:,.4f} | "
-                f"Cache-read: ${cost_info['cache_read_usd']:,.4f} | "
-                f"Cache-create: ${cost_info['cache_creation_usd']:,.4f} | "
-                f"Output: ${cost_info['output_usd']:,.4f}[/dim]"
-            )
-        elif status == "estimated":
-            total_usd = cost_info["total_usd"]
-            line = f"Estimated cost: [bold yellow]${total_usd:,.4f}[/bold yellow]"
-            if usd_inr is not None and "total_inr" in cost_info:
-                line += f"  (₹{cost_info['total_inr']:,.2f} at ₹{usd_inr}/USD)"
-            console.print(line + "  [dim](cache discounts unknown)[/dim]")
+    if status == "reported":
+        total_usd = cost_info["total_usd"]
+        line = f"Provider-reported cost: [bold green]${total_usd:,.4f}[/bold green]"
+        if usd_inr is not None and "total_inr" in cost_info:
+            line += f"  (₹{cost_info['total_inr']:,.2f} at ₹{usd_inr}/USD)"
+        console.print(line)
+        console.print(
+            f"  [dim]Uncached: ${cost_info['uncached_input_usd']:,.4f} | "
+            f"Cache-read: ${cost_info['cache_read_usd']:,.4f} | "
+            f"Cache-create: ${cost_info['cache_creation_usd']:,.4f} | "
+            f"Output: ${cost_info['output_usd']:,.4f}[/dim]"
+        )
+    elif status == "partially_reported":
+        total_usd = cost_info["total_usd"]
+        rep_n = cost_info.get("reported_calls", 0)
+        est_n = cost_info.get("estimated_calls", 0)
+        line = (
+            f"Partially reported cost: [bold yellow]${total_usd:,.4f}[/bold yellow] "
+            f"[dim]({rep_n}/{len(attr.calls)} calls reported, {est_n} estimated)[/dim]"
+        )
+        if usd_inr is not None and "total_inr" in cost_info:
+            line += f"  (₹{cost_info['total_inr']:,.2f} at ₹{usd_inr}/USD)"
+        console.print(line)
+    elif status == "estimated":
+        total_usd = cost_info["total_usd"]
+        line = f"Estimated cost: [bold yellow]${total_usd:,.4f}[/bold yellow]"
+        if usd_inr is not None and "total_inr" in cost_info:
+            line += f"  (₹{cost_info['total_inr']:,.2f} at ₹{usd_inr}/USD)"
+        console.print(line + "  [dim](cache discounts unknown)[/dim]")
     else:
         console.print("Cost: [dim]unknown (no pricing configured)[/dim]")
