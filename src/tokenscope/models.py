@@ -116,6 +116,7 @@ class Usage:
     cache_creation_input_tokens: int = 0
     cache_creation_details: dict[str, int] = field(default_factory=dict)
     provenance: UsageProvenance = UsageProvenance.PROVIDER
+    is_inconsistent: bool = False
 
     def __post_init__(self) -> None:
         if self.input_tokens < 0 or self.output_tokens < 0:
@@ -150,10 +151,7 @@ class Usage:
             if self.cache_creation_input_tokens == 0 and details_sum > 0:
                 object.__setattr__(self, "cache_creation_input_tokens", details_sum)
             elif details_sum > self.cache_creation_input_tokens:
-                raise ValueError(
-                    f"Sum of cache_creation_details ({details_sum}) exceeds "
-                    f"cache_creation_input_tokens ({self.cache_creation_input_tokens})"
-                )
+                object.__setattr__(self, "is_inconsistent", True)
 
         if self.uncached_input_tokens is not None:
             if self.uncached_input_tokens < 0:

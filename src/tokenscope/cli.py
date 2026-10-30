@@ -144,7 +144,7 @@ def audit(
             cache_creation_cost_per_mtok=(
                 cache_creation_price_per_mtok
                 if cache_creation_price_per_mtok is not None
-                else (base.cache_creation_cost_per_mtok if base else 0.0)
+                else (base.cache_creation_cost_per_mtok if base else None)
             ),
         )
 
