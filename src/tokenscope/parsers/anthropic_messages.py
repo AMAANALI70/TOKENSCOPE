@@ -257,4 +257,5 @@ def parse_call(payload: Any, index: int) -> Call:
         tools=structured_tools,
         response_messages=response_messages,
         metadata=metadata,
+        provider="anthropic",
     )

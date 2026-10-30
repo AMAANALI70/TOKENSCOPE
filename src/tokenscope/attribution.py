@@ -50,6 +50,7 @@ class CallAttribution:
     usage: Usage | None = None  # full normalized provider usage
     call_id: str | None = None
     model: str | None = None
+    provider: str | None = None
 
     @property
     def estimated_input(self) -> int:
@@ -64,6 +65,7 @@ class TraceAttribution:
     by_tool: dict[tuple[Category, str], int] = field(default_factory=dict)
     trace_id: str | None = None
     execution_id: str | None = None
+    source_format: str | None = None
 
     @property
     def billed_by_category(self) -> dict[Category, int]:
@@ -225,6 +227,7 @@ def attribute(trace: Trace, counter: TokenCounter) -> TraceAttribution:
             if (call.usage and call.usage.provenance == UsageProvenance.PROVIDER)
             else None
         )
+        call_provider = getattr(call, "provider", None) or trace.source_format
         calls.append(
             CallAttribution(
                 call_index=call.index,
@@ -235,6 +238,7 @@ def attribute(trace: Trace, counter: TokenCounter) -> TraceAttribution:
                 usage=call.usage,
                 call_id=call.call_id,
                 model=call.model,
+                provider=call_provider,
             )
         )
 
@@ -244,4 +248,5 @@ def attribute(trace: Trace, counter: TokenCounter) -> TraceAttribution:
         by_tool=dict(by_tool),
         trace_id=trace.trace_id,
         execution_id=trace.execution_id,
+        source_format=trace.source_format,
     )

@@ -202,6 +202,7 @@ class Call:
     tools: list[ToolDefinition] = field(default_factory=list)
     response_messages: list[Message] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
+    provider: str | None = None
 
 
 @dataclass(slots=True)

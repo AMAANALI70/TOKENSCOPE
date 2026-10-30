@@ -55,7 +55,13 @@ def audit(
     ] = None,
     model: Annotated[
         str | None,
-        typer.Option("--model", help="Model name for automatic pricing lookup (e.g. gpt-4o)."),
+        typer.Option(
+            "--model",
+            help=(
+                "Fallback model for calls lacking model info, "
+                "or target model for custom pricing overrides."
+            ),
+        ),
     ] = None,
     output_price_per_mtok: Annotated[
         float | None,
@@ -78,23 +84,33 @@ def audit(
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(code=2) from exc
 
-    pricing: ModelPricing | None = None
-    pricing_registry: PricingRegistry | None = None
-    target_model = model or (trace.calls[0].model if trace.calls and trace.calls[0].model else None)
+    # Start with a registry populated with default model pricing
+    pricing_registry = PricingRegistry()
+    for k, v in DEFAULT_PRICING._rates.items():
+        pricing_registry.register(k, v)
 
+    fallback_pricing: ModelPricing | None = None
     if model:
-        pricing = DEFAULT_PRICING.get(model, trace.source_format)
-    else:
-        pricing_registry = DEFAULT_PRICING
+        fallback_pricing = DEFAULT_PRICING.get(model, trace.source_format)
 
-    if (
-        price_per_mtok is not None
-        or output_price_per_mtok is not None
-        or cache_read_price_per_mtok is not None
-        or cache_creation_price_per_mtok is not None
-    ):
-        base = pricing or (DEFAULT_PRICING.get(target_model) if target_model else None)
-        pricing = ModelPricing(
+    has_custom_pricing = any(
+        p is not None
+        for p in (
+            price_per_mtok,
+            output_price_per_mtok,
+            cache_read_price_per_mtok,
+            cache_creation_price_per_mtok,
+        )
+    )
+
+    if has_custom_pricing:
+        first_model = (
+            trace.calls[0].model if trace.calls and trace.calls[0].model else None
+        )
+        base = fallback_pricing or (
+            DEFAULT_PRICING.get(first_model) if first_model else None
+        )
+        custom_pricing = ModelPricing(
             input_cost_per_mtok=(
                 price_per_mtok
                 if price_per_mtok is not None
@@ -116,7 +132,17 @@ def audit(
                 else (base.cache_creation_cost_per_mtok if base else 0.0)
             ),
         )
-        pricing_registry = None
+
+        if model:
+            # Explicit target model customization: override that model in the registry
+            # while preserving per-call resolution for other models in the trace
+            pricing_registry.register(model, custom_pricing)
+            if trace.source_format:
+                pricing_registry.register(f"{trace.source_format}/{model}", custom_pricing)
+            fallback_pricing = custom_pricing
+        else:
+            # Custom overrides without --model serve as fallback pricing
+            fallback_pricing = custom_pricing
 
     attr = attribute(trace, counter)
     if as_json:
@@ -126,7 +152,7 @@ def audit(
                     attr,
                     price_per_mtok=price_per_mtok,
                     usd_inr=usd_inr,
-                    pricing=pricing,
+                    pricing=fallback_pricing,
                     pricing_registry=pricing_registry,
                 ),
                 indent=2,
@@ -138,7 +164,7 @@ def audit(
             Console(),
             price_per_mtok=price_per_mtok,
             usd_inr=usd_inr,
-            pricing=pricing,
+            pricing=fallback_pricing,
             pricing_registry=pricing_registry,
         )
 

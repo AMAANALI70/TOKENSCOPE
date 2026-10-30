@@ -41,10 +41,11 @@ def to_dict(
         cost_dict = {"status": "unknown"}
     else:
         for c in attr.calls:
-            # Resolve model-specific pricing per call
+            # Resolve model-specific and provider-specific pricing per call
             call_pricing: ModelPricing | None = None
+            call_provider = c.provider or attr.source_format
             if registry is not None and c.model:
-                call_pricing = registry.get(c.model)
+                call_pricing = registry.get(c.model, provider=call_provider)
             if call_pricing is None:
                 call_pricing = fallback_pricing
 
@@ -84,6 +85,7 @@ def to_dict(
                 status = "estimated"
                 note = "Estimated tokens without provider cache discount accounting"
 
+            is_approx = any(b.is_approximate for b in call_breakdowns)
             cost_dict = {
                 "status": status,
                 "uncached_input_usd": uncached_usd,
@@ -94,6 +96,12 @@ def to_dict(
                 "reported_calls": reported_calls_count,
                 "estimated_calls": estimated_calls_count,
             }
+            if is_approx:
+                cost_dict["is_approximate"] = True
+                approx_notes: list[str] = []
+                for b in call_breakdowns:
+                    approx_notes.extend(b.notes)
+                cost_dict["approximate_notes"] = approx_notes
             if note:
                 cost_dict["note"] = note
             if usd_inr is not None:
@@ -250,6 +258,11 @@ def render(
             f"Cache-create: ${cost_info['cache_creation_usd']:,.4f} | "
             f"Output: ${cost_info['output_usd']:,.4f}[/dim]"
         )
+        if cost_info.get("is_approximate"):
+            console.print(
+                "  [dim yellow]Note: Duration-specific cache rates were unavailable "
+                "and approximated using aggregate rates.[/dim yellow]"
+            )
     elif status == "partially_reported":
         total_usd = cost_info["total_usd"]
         rep_n = cost_info.get("reported_calls", 0)
